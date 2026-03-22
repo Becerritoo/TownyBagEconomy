@@ -34,6 +34,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.server.ServerLoadEvent;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -69,6 +70,7 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
 
     private final Map<PlotKey, ManagedPlot> plots = new HashMap<>();
     private final Map<UUID, TaxPromptSession> taxPrompts = new HashMap<>();
+    private boolean startupSyncCompleted;
 
     private File dataFile;
     private YamlConfiguration dataConfig;
@@ -109,16 +111,9 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
         Objects.requireNonNull(getCommand("tbe"), "command tbe missing").setTabCompleter(this);
 
         Bukkit.getPluginManager().registerEvents(this, this);
-
-        Bukkit.getScheduler().runTask(this, () -> {
-            try {
-                syncFromTowny();
-                getLogger().info("TownyBagEconomy sync inicial completado.");
-            } catch (Exception e) {
-                getLogger().severe("Fallo en sync inicial: " + e.getMessage());
-                e.printStackTrace();
-            }
-        });
+        // Fallback for uncommon reload flows where ServerLoadEvent may not fire for this plugin.
+        scheduleStartupSync(60L, "fallback-enable");
+        scheduleStartupSync(240L, "fallback-enable-late");
     }
 
     @Override
@@ -139,6 +134,9 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onTownBlockSettingsChanged(TownBlockSettingsChangedEvent event) {
+        if (!startupSyncCompleted) {
+            return;
+        }
         TownBlock townBlock = event.getTownBlock();
         if (townBlock == null) {
             return;
@@ -147,6 +145,9 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
     }
 
     private void handlePlotTypeChange(TownBlock townBlock, TownBlockType oldType, TownBlockType newType) {
+        if (!startupSyncCompleted) {
+            return;
+        }
         if (townBlock == null) {
             return;
         }
@@ -190,6 +191,9 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onTownUnclaim(TownUnclaimEvent event) {
+        if (!startupSyncCompleted) {
+            return;
+        }
         PlotKey key = PlotKey.from(event.getWorldCoord(), event.getTown().getUUID());
         removePairForKey(key, true);
         saveData();
@@ -197,6 +201,9 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onTownDelete(DeleteTownEvent event) {
+        if (!startupSyncCompleted) {
+            return;
+        }
         String townUuid = event.getTownUUID().toString();
         List<PlotKey> toRemove = new ArrayList<>();
         for (PlotKey key : plots.keySet()) {
@@ -208,6 +215,28 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
             removePairForKey(key, true);
         }
         saveData();
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onServerLoad(ServerLoadEvent event) {
+        // Citizens often loads NPC data very late in startup; run two passes to avoid false "missing NPC" creation.
+        scheduleStartupSync(40L, "server-load");
+        scheduleStartupSync(200L, "server-load-late");
+    }
+
+    private void scheduleStartupSync(long delayTicks, String reason) {
+        Bukkit.getScheduler().runTaskLater(this, () -> runStartupSync(reason), delayTicks);
+    }
+
+    private void runStartupSync(String reason) {
+        try {
+            syncFromTowny();
+            startupSyncCompleted = true;
+            getLogger().info("TownyBagEconomy sync inicial completado (" + reason + ").");
+        } catch (Exception e) {
+            getLogger().severe("Fallo en sync inicial (" + reason + "): " + e.getMessage());
+            e.printStackTrace();
+        }
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -432,8 +461,46 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
             removePairForKey(key, true);
         }
 
+        cleanupDuplicateCitizens(active);
         cleanupOrphanCitizens(active);
         saveData();
+    }
+
+    private void cleanupDuplicateCitizens(Set<PlotKey> active) {
+        NPCRegistry registry = getRegistry();
+        Map<String, NPC> keeperByRole = new HashMap<>();
+        List<NPC> duplicates = new ArrayList<>();
+
+        for (NPC npc : registry.sorted()) {
+            PlotKey key = keyFromNpcMetadata(npc);
+            if (key == null || !active.contains(key)) {
+                continue;
+            }
+            NpcRole role = roleFromNpcMetadata(npc);
+            if (role == null) {
+                continue;
+            }
+
+            String roleKey = key.id() + ":" + role.name();
+            NPC currentKeeper = keeperByRole.get(roleKey);
+            if (currentKeeper == null) {
+                keeperByRole.put(roleKey, npc);
+                continue;
+            }
+
+            // Keep deterministic winner to avoid flip-flop between restarts.
+            if (npc.getId() < currentKeeper.getId()) {
+                duplicates.add(currentKeeper);
+                keeperByRole.put(roleKey, npc);
+            } else {
+                duplicates.add(npc);
+            }
+        }
+
+        for (NPC duplicate : duplicates) {
+            getLogger().warning("Eliminando NPC duplicado en bank plot: id=" + duplicate.getId() + " name=" + duplicate.getName());
+            duplicate.destroy();
+        }
     }
 
     private void ensurePairForPlot(PlotKey key, TownBlock townBlock, Town town) {
