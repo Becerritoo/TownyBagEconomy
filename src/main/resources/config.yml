@@ -1,0 +1,33 @@
+messages:
+  no-towny: "&cTownyBagEconomy requiere Towny."
+  no-citizens: "&cTownyBagEconomy requiere Citizens."
+  not-in-bank-plot: "&cDebes estar en una parcela banco para usar esto."
+  not-owner-town: "&cSolo puedes gestionar NPCs del banco de tu propia town."
+  no-permission-rank: "&cSolo alcalde o assistant pueden mover NPCs del banco."
+  move-success-self: "&aNPC &e{role}&a movido a tu posicion actual."
+  move-cancel: "&cNo se pudo mover el NPC."
+  denied-plot: "&cEste NPC solo funciona dentro de su parcela banco asignada."
+  sync-done: "&aSync completado."
+  tax-mode-deposit: "&aRecaudador Towny: escribe en chat el monto a &2depositar&a al banco del pueblo. Escribe &ecancelar&a para salir."
+  tax-mode-withdraw: "&eRecaudador Towny: escribe en chat el monto a &6retirar&e del banco del pueblo. Escribe &ccancelar&e para salir."
+  tax-invalid: "&cMonto invalido. Escribe un numero entero mayor a 0 o 'cancelar'."
+  tax-success-deposit: "&aDepositaste &e{amount}&a al banco del pueblo."
+  tax-success-withdraw: "&aRetiraste &e{amount}&a del banco del pueblo."
+  tax-fail: "&cNo se pudo completar la operacion: &7{reason}"
+  tax-cancel: "&eOperacion cancelada."
+
+npc:
+  names:
+    investment: "&6Banquero"
+    tax: "&bRecaudador Towny"
+  offsets:
+    investment-x: -1.0
+    investment-y: 0.0
+    investment-z: 0.0
+    tax-x: 1.0
+    tax-y: 0.0
+    tax-z: 0.0
+  use-protection: true
+
+towny:
+  assistant-rank-name: "assistant"
