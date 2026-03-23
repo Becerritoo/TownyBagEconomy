@@ -1,6 +1,6 @@
 name: TownyBagEconomy
 main: land.jarochitoland.townybankbridge.TownyBankBridgePlugin
-version: 1.0.0-JL.5
+version: 1.0.0-JL.6
 api-version: '1.21'
 author: Jarochitoland
 softdepend: [Towny, Citizens, BagOfGold]

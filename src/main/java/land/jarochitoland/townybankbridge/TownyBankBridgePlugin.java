@@ -112,8 +112,7 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
 
         Bukkit.getPluginManager().registerEvents(this, this);
         // Fallback for uncommon reload flows where ServerLoadEvent may not fire for this plugin.
-        scheduleStartupSync(60L, "fallback-enable");
-        scheduleStartupSync(240L, "fallback-enable-late");
+        scheduleStartupSync(240L, "fallback-enable", true);
     }
 
     @Override
@@ -163,7 +162,7 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
         boolean isBank = isBankType(newType);
 
         if (!wasBank && isBank) {
-            ensurePairForPlot(key, townBlock, town);
+            ensurePairForPlot(key, townBlock, town, true);
             saveData();
             return;
         }
@@ -182,7 +181,7 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
 
         PlotKey key = PlotKey.from(townBlock.getWorldCoord(), town.getUUID());
         if (isBankType(townBlock.getType())) {
-            ensurePairForPlot(key, townBlock, town);
+            ensurePairForPlot(key, townBlock, town, true);
         } else {
             removePairForKey(key, true);
         }
@@ -219,19 +218,26 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onServerLoad(ServerLoadEvent event) {
-        // Citizens often loads NPC data very late in startup; run two passes to avoid false "missing NPC" creation.
-        scheduleStartupSync(40L, "server-load");
-        scheduleStartupSync(200L, "server-load-late");
+        // Main pass creates missing NPCs once Citizens has finished loading.
+        scheduleStartupSync(60L, "server-load", true);
+        // Late pass verifies/reconciles only, without creating new NPCs.
+        scheduleStartupSync(220L, "server-load-verify", false);
     }
 
-    private void scheduleStartupSync(long delayTicks, String reason) {
-        Bukkit.getScheduler().runTaskLater(this, () -> runStartupSync(reason), delayTicks);
+    private void scheduleStartupSync(long delayTicks, String reason, boolean allowCreate) {
+        Bukkit.getScheduler().runTaskLater(this, () -> runStartupSync(reason, allowCreate), delayTicks);
     }
 
-    private void runStartupSync(String reason) {
+    private void runStartupSync(String reason, boolean allowCreate) {
         try {
-            syncFromTowny();
-            startupSyncCompleted = true;
+            if (allowCreate && startupSyncCompleted) {
+                getLogger().fine("Saltando sync inicial (" + reason + ") porque ya fue completado.");
+                return;
+            }
+            syncFromTowny(allowCreate);
+            if (allowCreate) {
+                startupSyncCompleted = true;
+            }
             getLogger().info("TownyBagEconomy sync inicial completado (" + reason + ").");
         } catch (Exception e) {
             getLogger().severe("Fallo en sync inicial (" + reason + "): " + e.getMessage());
@@ -320,7 +326,7 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
                     sender.sendMessage(color("&cSin permiso."));
                     return true;
                 }
-                syncFromTowny();
+                syncFromTowny(true);
                 sender.sendMessage(color(msg("messages.sync-done")));
                 return true;
             }
@@ -404,7 +410,7 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
         }
 
         PlotKey key = PlotKey.from(current.getWorldCoord(), town.getUUID());
-        ensurePairForPlot(key, current, town);
+        ensurePairForPlot(key, current, town, true);
 
         ManagedPlot managed = plots.get(key);
         if (managed == null) {
@@ -429,7 +435,7 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
         return true;
     }
 
-    private void syncFromTowny() {
+    private void syncFromTowny(boolean allowCreate) {
         if (!isPluginEnabled("Towny") || !isPluginEnabled("Citizens")) {
             return;
         }
@@ -448,7 +454,7 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
 
             PlotKey key = PlotKey.from(townBlock.getWorldCoord(), town.getUUID());
             active.add(key);
-            ensurePairForPlot(key, townBlock, town);
+            ensurePairForPlot(key, townBlock, town, allowCreate);
         }
 
         List<PlotKey> stale = new ArrayList<>();
@@ -468,8 +474,7 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
 
     private void cleanupDuplicateCitizens(Set<PlotKey> active) {
         NPCRegistry registry = getRegistry();
-        Map<String, NPC> keeperByRole = new HashMap<>();
-        List<NPC> duplicates = new ArrayList<>();
+        Map<RoleSlot, List<NPC>> grouped = new HashMap<>();
 
         for (NPC npc : registry.sorted()) {
             PlotKey key = keyFromNpcMetadata(npc);
@@ -480,30 +485,63 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
             if (role == null) {
                 continue;
             }
+            grouped.computeIfAbsent(new RoleSlot(key, role), unused -> new ArrayList<>()).add(npc);
+        }
 
-            String roleKey = key.id() + ":" + role.name();
-            NPC currentKeeper = keeperByRole.get(roleKey);
-            if (currentKeeper == null) {
-                keeperByRole.put(roleKey, npc);
+        for (Map.Entry<RoleSlot, List<NPC>> entry : grouped.entrySet()) {
+            RoleSlot slot = entry.getKey();
+            List<NPC> candidates = entry.getValue();
+            if (candidates.isEmpty()) {
                 continue;
             }
 
-            // Keep deterministic winner to avoid flip-flop between restarts.
-            if (npc.getId() < currentKeeper.getId()) {
-                duplicates.add(currentKeeper);
-                keeperByRole.put(roleKey, npc);
-            } else {
-                duplicates.add(npc);
+            ManagedPlot managed = plots.get(slot.key);
+            int preferredId = managed == null ? 0 : managed.getNpcId(slot.role);
+            NPC keeper = selectKeeper(candidates, preferredId);
+            if (keeper == null) {
+                continue;
             }
-        }
 
-        for (NPC duplicate : duplicates) {
-            getLogger().warning("Eliminando NPC duplicado en bank plot: id=" + duplicate.getId() + " name=" + duplicate.getName());
-            duplicate.destroy();
+            if (managed != null && managed.getNpcId(slot.role) != keeper.getId()) {
+                managed.setNpcId(slot.role, keeper.getId());
+                getLogger().info("Reconciliado " + slot.role.name().toLowerCase(Locale.ROOT) + " en "
+                        + slot.key.simple() + ": data.yml=" + preferredId + " -> keeper=" + keeper.getId());
+            }
+
+            for (NPC npc : candidates) {
+                if (npc.getId() == keeper.getId()) {
+                    continue;
+                }
+                getLogger().warning("Eliminando NPC duplicado [" + slot.role.name().toLowerCase(Locale.ROOT) + "] en "
+                        + slot.key.simple() + ": keeper=" + keeper.getId() + ", removed=" + npc.getId());
+                npc.destroy();
+            }
         }
     }
 
-    private void ensurePairForPlot(PlotKey key, TownBlock townBlock, Town town) {
+    private NPC selectKeeper(List<NPC> candidates, int preferredId) {
+        if (candidates == null || candidates.isEmpty()) {
+            return null;
+        }
+
+        if (preferredId > 0) {
+            for (NPC npc : candidates) {
+                if (npc.getId() == preferredId) {
+                    return npc;
+                }
+            }
+        }
+
+        NPC keeper = candidates.get(0);
+        for (NPC npc : candidates) {
+            if (npc.getId() < keeper.getId()) {
+                keeper = npc;
+            }
+        }
+        return keeper;
+    }
+
+    private void ensurePairForPlot(PlotKey key, TownBlock townBlock, Town town, boolean allowCreate) {
         ManagedPlot managed = plots.computeIfAbsent(key, k -> new ManagedPlot());
         Location center = centerFor(townBlock);
 
@@ -528,13 +566,19 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
             managed.taxCustomLocation = null;
         }
 
-        managed.investmentNpcId = ensureInvestmentNpc(key, managed.investmentNpcId, invLoc);
+        int resolvedInvestment = ensureInvestmentNpc(key, managed.investmentNpcId, invLoc, allowCreate);
+        if (resolvedInvestment > 0) {
+            managed.investmentNpcId = resolvedInvestment;
+        }
 
-        managed.taxNpcId = ensureTaxNpc(key, managed.taxNpcId,
-                color(getConfig().getString("npc.names.tax", "&bRecaudador Towny")), taxLoc);
+        int resolvedTax = ensureTaxNpc(key, managed.taxNpcId,
+                color(getConfig().getString("npc.names.tax", "&bRecaudador Towny")), taxLoc, allowCreate);
+        if (resolvedTax > 0) {
+            managed.taxNpcId = resolvedTax;
+        }
     }
 
-    private int ensureInvestmentNpc(PlotKey key, int currentId, Location targetLocation) {
+    private int ensureInvestmentNpc(PlotKey key, int currentId, Location targetLocation, boolean allowCreate) {
         NPCRegistry registry = getRegistry();
 
         NPC npc = currentId > 0 ? registry.getById(currentId) : null;
@@ -550,7 +594,7 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
             npc = findBagBankerInPlot(registry, key);
         }
 
-        if (npc == null) {
+        if (npc == null && allowCreate) {
             npc = createOfficialBagOfGoldBanker(targetLocation);
             if (npc != null) {
                 getLogger().info("NPC creado [INVESTMENT] en " + key.simple());
@@ -563,13 +607,11 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
         }
 
         writeNpcMetadata(npc, key, NpcRole.INVESTMENT);
-        if (!npc.isSpawned()) {
-            npc.spawn(targetLocation);
-        }
+        ensureNpcPlacement(npc, key, targetLocation);
         return npc.getId();
     }
 
-    private int ensureTaxNpc(PlotKey key, int currentId, String name, Location location) {
+    private int ensureTaxNpc(PlotKey key, int currentId, String name, Location location, boolean allowCreate) {
         NPCRegistry registry = getRegistry();
 
         NPC npc = currentId > 0 ? registry.getById(currentId) : null;
@@ -581,7 +623,7 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
             npc = findNpcByMetadata(registry, key, NpcRole.TAX);
         }
 
-        if (npc == null) {
+        if (npc == null && allowCreate) {
             npc = registry.createNPC(EntityType.PLAYER, name);
             if (getConfig().getBoolean("npc.use-protection", true)) {
                 npc.setProtected(true);
@@ -590,14 +632,39 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
             getLogger().info("NPC creado [TAX] en " + key.simple());
         }
 
+        if (npc == null) {
+            getLogger().warning("No se pudo asegurar NPC tax en " + key.simple());
+            return 0;
+        }
+
         writeNpcMetadata(npc, key, NpcRole.TAX);
         npc.setName(name);
         applyLookCloseTrait(npc);
 
-        if (!npc.isSpawned()) {
-            npc.spawn(location);
-        }
+        ensureNpcPlacement(npc, key, location);
         return npc.getId();
+    }
+
+    private void ensureNpcPlacement(NPC npc, PlotKey key, Location location) {
+        if (npc == null || location == null) {
+            return;
+        }
+
+        Location current = npc.isSpawned() ? npc.getEntity().getLocation() : npc.getStoredLocation();
+        boolean outsidePlot = current == null || current.getWorld() == null || !isNpcInsidePlot(npc, key);
+        if (!outsidePlot) {
+            return;
+        }
+
+        Location safe = location.clone();
+        safe.setPitch(0F);
+        if (npc.isSpawned()) {
+            npc.teleport(safe, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.PLUGIN);
+        } else {
+            npc.spawn(safe);
+        }
+        getLogger().info("Reubicado NPC [" + roleFromNpcMetadata(npc) + "] al plot bank correcto en " + key.simple()
+                + " (id=" + npc.getId() + ").");
     }
 
     private void applyLookCloseTrait(NPC npc) {
@@ -867,19 +934,56 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
     }
 
     private String firstStringMeta(NPC npc, String primary, String legacy) {
-        String value = npc.data().get(primary);
-        if (value == null || value.isBlank()) {
-            value = npc.data().get(legacy);
+        Object value = getMetaValue(npc, primary);
+        if (value == null || String.valueOf(value).isBlank()) {
+            value = getMetaValue(npc, legacy);
         }
-        return value;
+        if (value == null) {
+            return null;
+        }
+        String text = String.valueOf(value).trim();
+        return text.isEmpty() ? null : text;
     }
 
     private Integer firstIntMeta(NPC npc, String primary, String legacy) {
-        Integer value = npc.data().get(primary);
+        Object value = getMetaValue(npc, primary);
         if (value == null) {
-            value = npc.data().get(legacy);
+            value = getMetaValue(npc, legacy);
         }
-        return value;
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        try {
+            return Integer.parseInt(String.valueOf(value));
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private Object getMetaValue(NPC npc, String path) {
+        Object direct = npc.data().get(path);
+        if (direct != null) {
+            return direct;
+        }
+
+        int dot = path.indexOf('.');
+        if (dot <= 0 || dot == path.length() - 1) {
+            return null;
+        }
+
+        String root = path.substring(0, dot);
+        String leaf = path.substring(dot + 1);
+        Object nested = npc.data().get(root);
+        if (nested instanceof Map<?, ?> map) {
+            return map.get(leaf);
+        }
+        if (nested instanceof ConfigurationSection section) {
+            return section.get(leaf);
+        }
+        return null;
     }
 
     private void writeNpcMetadata(NPC npc, PlotKey key, NpcRole role) {
@@ -1105,6 +1209,32 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
         }
     }
 
+    private static final class RoleSlot {
+        private final PlotKey key;
+        private final NpcRole role;
+
+        private RoleSlot(PlotKey key, NpcRole role) {
+            this.key = key;
+            this.role = role;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof RoleSlot roleSlot)) {
+                return false;
+            }
+            return Objects.equals(key, roleSlot.key) && role == roleSlot.role;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(key, role);
+        }
+    }
+
     private static final class ManagedPlot {
         private int investmentNpcId;
         private int taxNpcId;
@@ -1113,6 +1243,14 @@ public class TownyBankBridgePlugin extends JavaPlugin implements Listener, Comma
 
         int getNpcId(NpcRole role) {
             return role == NpcRole.INVESTMENT ? investmentNpcId : taxNpcId;
+        }
+
+        void setNpcId(NpcRole role, int npcId) {
+            if (role == NpcRole.INVESTMENT) {
+                investmentNpcId = npcId;
+            } else {
+                taxNpcId = npcId;
+            }
         }
 
         void setCustomLocation(NpcRole role, SerializedLocation location) {

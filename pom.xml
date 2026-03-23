@@ -5,7 +5,7 @@
 
     <groupId>land.jarochitoland</groupId>
     <artifactId>TownyBagEconomy</artifactId>
-    <version>1.0.0-JL.5</version>
+    <version>1.0.0-JL.6</version>
     <packaging>jar</packaging>
 
     <name>TownyBagEconomy</name>
@@ -37,7 +37,7 @@
             <artifactId>towny</artifactId>
             <version>0.102.0.0</version>
             <scope>system</scope>
-            <systemPath>/srv/minecraft/plugins/Towny-0.102.0.0.jar</systemPath>
+            <systemPath>/srv/minecraft/server-jl/plugins/Towny-0.102.0.0.jar</systemPath>
         </dependency>
 
         <dependency>
@@ -45,7 +45,7 @@
             <artifactId>citizens</artifactId>
             <version>2.0.37</version>
             <scope>system</scope>
-            <systemPath>/srv/minecraft/plugins/Citizens-2.0.37-b3763.jar</systemPath>
+            <systemPath>/srv/minecraft/server-jl/plugins/Citizens-2.0.37-b3763.jar</systemPath>
         </dependency>
     </dependencies>
 
